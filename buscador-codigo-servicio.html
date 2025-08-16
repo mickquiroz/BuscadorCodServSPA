@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Buscador de Observación por Código de Servicio</title>
+
+  <!-- UI -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- SheetJS -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- MSAL: sin defer para garantizar carga antes del boot -->
+  <script id="msalScript"
+          src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.11.1/dist/msal-browser.min.js"
+          onload="window.__msalLoaded=true"></script>
+
+  <style>
+    .dropzone{border:2px dashed rgba(0,0,0,.15)}
+    .dropzone.dragover{border-color: rgba(59,130,246,.7); background: rgba(59,130,246,.06)}
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 text-slate-800">
+  <main class="max-w-3xl mx-auto p-6">
+    <header class="mb-6 flex items-start justify-between gap-4">
+      <div>
+        <h1 class="text-2xl md:text-3xl font-semibold tracking-tight">
+          Consulta de <span class="text-blue-600">Observación</span> por Código de Servicio
+        </h1>
+        <p class="text-sm text-slate-600 mt-1">
+          Sube tu Excel (una sola hoja). Se filtra <code class="font-mono">codservicio</code> y devuelve <code class="font-mono">obs</code>.
+          <span class="ml-1">🔒 Acceso con cuenta Microsoft corporativa.</span>
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btnSignIn" class="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs shadow hover:bg-blue-700 hidden">Iniciar sesión</button>
+        <div id="userBadge" class="hidden text-right">
+          <div class="text-xs text-slate-500">Sesión iniciada</div>
+          <div id="userName" class="text-sm font-medium truncate">—</div>
+          <button id="btnSignOut" class="mt-1 px-2.5 py-1.5 rounded-md bg-slate-100 text-slate-700 text-xs ring-1 ring-slate-200 hover:bg-slate-50">Cerrar sesión</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Guard de autenticación -->
+    <section id="authGuard" class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5">
+      <h2 class="text-base font-medium mb-2">Acceso restringido</h2>
+      <p class="text-sm text-slate-600">
+        Solo personal de la empresa. Inicia sesión con tu cuenta Microsoft corporativa (MFA via Microsoft Authenticator si tu política lo requiere).
+      </p>
+      <button id="btnSignIn2" class="mt-3 px-4 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium shadow hover:bg-blue-700">Iniciar sesión</button>
+      <p id="authMsg" class="mt-3 text-xs text-slate-500"></p>
+    </section>
+
+    <!-- App -->
+    <div id="app" class="hidden">
+      <section class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5 mb-5 mt-5">
+        <h2 class="text-base font-medium mb-3">1) Cargar Excel</h2>
+        <div id="drop" class="dropzone rounded-xl p-6 flex flex-col items-center justify-center gap-3 cursor-pointer">
+          <svg xmlns="http://www.w3.org/2000/svg" class="w-10 h-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 15.75 7.5 11.25 12 15.75M7.5 11.25V21M16.5 12.75H19.125C20.1605 12.75 21 11.9105 21 10.875V5.625C21 4.58947 20.1605 3.75 19.125 3.75H4.875C3.83947 3.75 3 4.58947 3 5.625V10.875C3 11.9105 3.83947 12.75 4.875 12.75H7.5"/></svg>
+          <p class="text-sm text-slate-600 text-center">Arrastra tu archivo <span class="font-medium">.xlsx / .xls</span> aquí o haz clic para seleccionar</p>
+          <input id="file" type="file" accept=".xlsx,.xls" class="hidden" />
+          <div class="flex gap-3 mt-2">
+            <button id="btnSelect" class="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm shadow hover:bg-blue-700">Seleccionar archivo</button>
+            <button id="btnTemplate" class="px-3 py-2 rounded-lg bg-slate-100 text-slate-700 text-sm ring-1 ring-slate-200 hover:bg-slate-50">Descargar plantilla</button>
+          </div>
+          <p id="fileName" class="text-xs text-slate-500 mt-2"></p>
+        </div>
+        <p class="text-xs text-slate-500 mt-3">Encabezados: <code class="font-mono">codservicio</code>, <code class="font-mono">obs</code>. Toma la primera coincidencia.</p>
+        <div id="status" class="mt-3 hidden"></div>
+      </section>
+
+      <section class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5 mb-5">
+        <h2 class="text-base font-medium mb-3">2) Buscar</h2>
+        <div class="grid md:grid-cols-[1fr_auto] gap-3 items-end">
+          <div>
+            <label for="codigo" class="block text-sm font-medium mb-1">Código de servicio</label>
+            <input id="codigo" type="text" placeholder="Ej. SVC-00123" class="w-full rounded-xl border-slate-300 focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2" />
+          </div>
+          <button id="btnBuscar" class="px-5 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-medium shadow hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">Buscar</button>
+        </div>
+      </section>
+
+      <section class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-5">
+        <h2 class="text-base font-medium mb-3">3) Resultado</h2>
+        <div>
+          <label for="observacion" class="block text-sm font-medium mb-1">Observación</label>
+          <input id="observacion" type="text" class="w-full rounded-xl border-slate-300 focus:border-blue-500 focus:ring-blue-500 text-sm px-3 py-2" placeholder="—" readonly />
+          <p id="foundInfo" class="text-xs text-slate-500 mt-2"></p>
+        </div>
+      </section>
+
+      <footer class="mt-8 text-xs text-slate-500">
+        <p>Todo se ejecuta en tu navegador. No se sube ningún dato a servidores.</p>
+      </footer>
+    </div>
+  </main>
+
+  <script>
+    // === CONFIG MSAL (rellena estos dos) ===
+    const TENANT_ID = "68b185e8-9deb-4936-98f0-5bca48524c9c";     // GUID del tenant o dominio (p.ej. contoso.onmicrosoft.com)
+    const CLIENT_ID = "f80b1638-ea4b-4c35-b656-6c9bba0af342";     // Application (client) ID
+
+    // Utilidad pequeña para mensajes
+    function setAuthMsg(msg, type="info"){
+      const el = document.getElementById('authMsg');
+      const base = "mt-3 text-xs px-3 py-2 rounded-lg ";
+      const style = type==="error" ? "bg-rose-50 text-rose-700 ring-1 ring-rose-200"
+                  : type==="warn"  ? "bg-amber-50 text-amber-800 ring-1 ring-amber-200"
+                  :                  "bg-slate-50 text-slate-700 ring-1 ring-slate-200";
+      el.className = base + style;
+      el.textContent = msg;
+    }
+
+    // Arranque cuando MSAL esté realmente cargado
+    function boot(){
+      try{
+        if(!window.msal){ setAuthMsg("MSAL no cargó. Revisa tu red/Firewall/CDN.", "error"); return; }
+
+        const msalConfig = {
+          auth: {
+            clientId: CLIENT_ID,
+            authority: "https://login.microsoftonline.com/" + TENANT_ID,
+            redirectUri: window.location.origin + window.location.pathname
+          },
+          cache: { cacheLocation: "sessionStorage" }
+        };
+
+        const msalInstance = new msal.PublicClientApplication(msalConfig);
+        let currentAccount = null;
+
+        function inAllowedTenant(acc){
+          const tid = acc?.tenantId || acc?.idTokenClaims?.tid;
+          return !TENANT_ID || tid === TENANT_ID;
+        }
+
+        async function initAuth(){
+          try{
+            const result = await msalInstance.handleRedirectPromise();
+            if(result?.account) currentAccount = result.account;
+            if(!currentAccount){
+              const accs = msalInstance.getAllAccounts();
+              if(accs.length) currentAccount = accs[0];
+            }
+            updateAuthUI();
+          }catch(err){
+            console.error(err);
+            setAuthMsg("Error MSAL: " + (err.message || err), "error");
+          }
+        }
+
+        function updateAuthUI(){
+          const authGuard = document.getElementById('authGuard');
+          const app = document.getElementById('app');
+          const btnSignIn = document.getElementById('btnSignIn');
+          const userBadge = document.getElementById('userBadge');
+          const userName = document.getElementById('userName');
+
+          if(currentAccount && inAllowedTenant(currentAccount)){
+            const name = currentAccount.name || currentAccount.username;
+            userName.textContent = name || 'Usuario';
+            btnSignIn.classList.add('hidden');
+            userBadge.classList.remove('hidden');
+            authGuard.classList.add('hidden');
+            app.classList.remove('hidden');
+          }else{
+            btnSignIn.classList.remove('hidden');
+            userBadge.classList.add('hidden');
+            authGuard.classList.remove('hidden');
+            app.classList.add('hidden');
+          }
+        }
+
+        function signIn(){
+          if(!CLIENT_ID || !TENANT_ID){
+            setAuthMsg("Falta configurar CLIENT_ID / TENANT_ID.", "warn");
+            return;
+          }
+          // Nota: si tu Redirect URI no coincide, verás error en consola
+          msalInstance.loginRedirect({ scopes: ["openid","profile","email"] });
+        }
+
+        function signOut(){
+          if(currentAccount){
+            msalInstance.logoutRedirect({ account: currentAccount });
+          }else{
+            msalInstance.logoutRedirect();
+          }
+        }
+
+        // Bind de botones
+        document.getElementById('btnSignIn').addEventListener('click', signIn);
+        document.getElementById('btnSignIn2').addEventListener('click', signIn);
+        document.getElementById('btnSignOut').addEventListener('click', signOut);
+
+        // === LÓGICA DE NEGOCIO ===
+        const state = { ready:false, map:new Map(), keys:{codeKey:null,obsKey:null}, rowsCount:0 };
+        const normalizeKey  = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\p{Diacritic}/gu,'').replace(/\W+/g,'').trim();
+        const normalizeValue= s => String(s??'').trim();
+
+        const fileInput=document.getElementById('file'),
+              drop=document.getElementById('drop'),
+              btnSelect=document.getElementById('btnSelect'),
+              btnTemplate=document.getElementById('btnTemplate'),
+              fileName=document.getElementById('fileName'),
+              statusEl=document.getElementById('status'),
+              codigoEl=document.getElementById('codigo'),
+              btnBuscar=document.getElementById('btnBuscar'),
+              obsEl=document.getElementById('observacion'),
+              foundInfo=document.getElementById('foundInfo');
+
+        btnBuscar.disabled = true;
+
+        function showStatus(type, msg){
+          statusEl.className = "";
+          const base = "mt-3 text-sm rounded-lg px-3 py-2 ";
+          const style = type==="ok"   ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                       : type==="warn" ? "bg-amber-50 text-amber-800 ring-1 ring-amber-200"
+                       :                 "bg-rose-50 text-rose-700 ring-1 ring-rose-200";
+          statusEl.className = base + style;
+          statusEl.textContent = msg;
+          statusEl.classList.remove("hidden");
+        }
+        function clearResult(){ obsEl.value=''; foundInfo.textContent='' }
+
+        async function handleFile(file){
+          if(!currentAccount || !inAllowedTenant(currentAccount)){
+            showStatus('warn','Debes iniciar sesión corporativa para cargar archivos.');
+            return;
+          }
+          clearResult(); state.ready=false; btnBuscar.disabled=true; state.map.clear(); fileName.textContent = file ? 'Archivo: '+file.name : '';
+          try{
+            const data=await file.arrayBuffer();
+            const wb=XLSX.read(data,{type:'array'});
+            const sheet=wb.Sheets[wb.SheetNames[0]];
+            const rows=XLSX.utils.sheet_to_json(sheet,{defval:''});
+            if(!rows.length){ showStatus('warn','La hoja está vacía.'); return; }
+            const cols=Object.keys(rows[0]);
+            const candidates=cols.map(k=>({raw:k,norm:normalizeKey(k)}));
+            const findKey=opts=>(candidates.find(c=>opts.includes(c.norm))||{}).raw;
+            const codeKey=findKey(['codservicio','codigo','codigodeservicio','codserv','cod_servicio','codigo_servicio','codigo2']);
+            const obsKey =findKey(['obs','observacion','observacion1','observaciones','observ','observaci']);
+            if(!codeKey||!obsKey){ showStatus('err','No se encontraron columnas requeridas. Detectadas: ['+cols.join(', ')+'].'); return; }
+            for(const r of rows){
+              const code = normalizeValue(r[codeKey]);
+              if(!code) continue;
+              if(!state.map.has(code)) state.map.set(code, String(r[obsKey] ?? ''));
+            }
+            state.keys={codeKey,obsKey}; state.rowsCount=rows.length; state.ready=true; btnBuscar.disabled=false;
+            showStatus('ok',`Datos cargados (${state.rowsCount} filas). Columnas: «${codeKey}» → «${obsKey}».`);
+          }catch(err){ console.error(err); showStatus('err','Error leyendo el Excel: '+(err.message||err)); }
+        }
+
+        function buscar(){
+          clearResult();
+          if(!currentAccount || !inAllowedTenant(currentAccount)){
+            showStatus('warn','Debes iniciar sesión corporativa para buscar.');
+            return;
+          }
+          if(!state.ready){ showStatus('warn','Primero carga el Excel. ✅'); return; }
+          const code = normalizeValue(codigoEl.value);
+          if(!code){ showStatus('warn','Escribe un código de servicio.'); return; }
+          const val = state.map.get(code);
+          if(val===undefined){ obsEl.value=''; foundInfo.textContent='No se encontró el código.'; }
+          else{ obsEl.value=val; foundInfo.textContent='Coincidencia encontrada.'; }
+        }
+
+        // Eventos UI
+        document.getElementById('btnSelect').addEventListener('click', ()=> fileInput.click());
+        document.getElementById('btnTemplate').addEventListener('click', descargarPlantilla);
+        fileInput.addEventListener('change', e=>{ const f=e.target.files[0]; if(f) handleFile(f); });
+        document.getElementById('drop').addEventListener('click', ()=> fileInput.click());
+        ['dragenter','dragover'].forEach(ev=> drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.add('dragover'); }));
+        ['dragleave','drop'].forEach(ev=> drop.addEventListener(ev, e=>{ e.preventDefault(); drop.classList.remove('dragover'); }));
+        drop.addEventListener('drop', e=>{ const f=e.dataTransfer.files[0]; if(f) handleFile(f); });
+        btnBuscar.addEventListener('click', buscar);
+        codigoEl.addEventListener('keydown', e=>{ if(e.key==='Enter') buscar(); });
+
+        function descargarPlantilla(){
+          const wb=XLSX.utils.book_new();
+          const data=[['codservicio','obs'],['SVC-001','Entrega express'],['SVC-002','Requiere confirmación del cliente'],['SVC-003','Sin observaciones']];
+          const ws=XLSX.utils.aoa_to_sheet(data);
+          XLSX.utils.book_append_sheet(wb, ws, 'data');
+          XLSX.writeFile(wb,'plantilla_codservicio.xlsx');
+        }
+
+        // Inicia autenticación
+        initAuth();
+
+      }catch(e){
+        console.error(e);
+        setAuthMsg("Error al inicializar autenticación: " + (e.message || e), "error");
+      }
+    }
+
+    // Llama boot cuando MSAL haya cargado
+    if (window.__msalLoaded) boot();
+    else document.getElementById('msalScript').addEventListener('load', boot);
+  </script>
+</body>
+</html>
